@@ -12,7 +12,7 @@ Entrées :
 - time_limits (optionnel) : temps maximal de résolution (-1 si le temps n'est pas limité) (-1 par défaut)
 - classes : labels des classes figurant dans le dataset
 """
-function build_tree(x::Matrix{Float64}, y::Vector{Any}, D::Int64, classes; multivariate::Bool=false, time_limit::Int64 = -1, mu::Float64=10^(-4))
+function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivariate::Bool=false, time_limit::Int64 = -1, mu::Float64=10^(-4))
     
     dataCount = length(y) # Nombre de données d'entraînement
     featuresCount = length(x[1, :]) # Nombre de caractéristiques
