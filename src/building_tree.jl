@@ -1,4 +1,5 @@
 include("struct/tree.jl")
+include("callback_building.jl")
 
 """
 Construit un arbre de décision par résolution d'un programme linéaire en nombres entiers
@@ -12,7 +13,7 @@ Entrées :
 - time_limits (optionnel) : temps maximal de résolution (-1 si le temps n'est pas limité) (-1 par défaut)
 - classes : labels des classes figurant dans le dataset
 """
-function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivariate::Bool=false, time_limit::Int64 = -1, mu::Float64=10^(-4))
+function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivariate::Bool=false, time_limit::Int64 = -1, mu::Float64=10^(-4), with_callback::Bool=false)
     
     dataCount = length(y) # Nombre de données d'entraînement
     featuresCount = length(x[1, :]) # Nombre de caractéristiques
@@ -109,6 +110,36 @@ function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivaria
 
     classif = @expression(m, sum(u_at[i, 1] for i in 1:dataCount))
 
+    ## Déclaration des inégalités valides utilisées pour la résolution
+    if with_callback
+        MOI.set(m, MOI.NumberOfThreads(), 1)
+
+        function strengthening_callback(cb_data::CPLEX.CallbackContext, context_id::Clong, verbose::Bool=false)
+            # Teste si le callback viens d'une solution entière
+            if is_integer_point(cb_data, context_id)
+                # A exécuter avant la récupération des valeurs sinon erreur
+                CPLEX.load_callback_variable_primal(cb_data, context_id)
+                if verbose
+                    println("New callback on integer solution")
+                end
+                # A compléter avant utilisation (et a supprimer si aucune utilisation)
+                add_lazy_constraint(m, cb_data, multivariate, verbose)
+            end
+            # Teste si le callback viens d'une solution fractionnaire
+            if is_fractional_point(cb_data, context_id)
+                # A exécuter avant la récupération des valeurs sinon erreur
+                CPLEX.load_callback_variable_primal(cb_data, context_id)
+                if verbose
+                    println("New callback on fractional solution")
+                end
+                # A compléter avant utilisation (et a supprimer si aucune utilisation)
+                add_user_cut(m, cb_data, multivariate, verbose)
+            end
+        end
+
+        MOI.set(m, CPLEX.CallbackFunction(), robustness_callback)
+    end
+
     starting_time = time()
     optimize!(m)
     resolution_time = time() - starting_time
@@ -165,7 +196,7 @@ Entrées :
 - mu (optionnel, utilisé en multivarié): distance minimale à gauche d'une séparation où aucune donnée ne peut se trouver (i.e., pour la séparation ax <= b, il n'y aura aucune donnée dans ]b - ax - mu, b - ax[) (10^-4 par défaut)
 - time_limits (optionnel) : temps maximal de résolution (-1 si le temps n'est pas limité) (-1 par défaut)
 """
-function build_tree(clusters::Vector{Cluster}, D::Int64, classes;multivariate::Bool=false, time_limit::Int64 = -1, mu::Float64=10^(-4))
+function build_tree(clusters::Vector{Cluster}, D::Int64, classes;multivariate::Bool=false, time_limit::Int64 = -1, mu::Float64=10^(-4), with_callback::Bool=false)
     
     clusterCount = length(clusters) # Nombre de données d'entraînement
     featuresCount = length(clusters[1].lBounds) # Nombre de caractéristiques
