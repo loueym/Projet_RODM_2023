@@ -12,7 +12,7 @@ Entrées :
 - time_limits (optionnel) : temps maximal de résolution (-1 si le temps n'est pas limité) (-1 par défaut)
 - classes : labels des classes figurant dans le dataset
 """
-function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivariate::Bool=false, time_limit::Int64 = -1, mu::Float64=10^(-4))
+function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivariate::Bool=false, add_cuts::Bool=false, time_limit::Int64 = -1, mu::Float64=10^(-4))
     
     dataCount = length(y) # Nombre de données d'entraînement
     featuresCount = length(x[1, :]) # Nombre de caractéristiques
@@ -21,6 +21,7 @@ function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivaria
     leavesCount = 2^D # Nombre de feuilles de l'arbre
 
     m = Model(CPLEX.Optimizer) 
+    MOI.set(m, MOI.NumberOfThreads(), 1)
     set_silent(m)
 
     if time_limit!=-1
@@ -109,6 +110,45 @@ function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivaria
 
     classif = @expression(m, sum(u_at[i, 1] for i in 1:dataCount))
 
+    
+    function callback_function(cb_data::CPLEX.CallbackContext, context_id::Clong)
+        if isIntegerPoint(cb_data, context_id)
+            callback_called = true
+            CPLEX.load_callback_variable_primal(cb_data, context_id)
+
+            if multivariate
+                a_star = callback_value.(cb_data, s)
+            else
+                a_star = callback_value.(cb_data, a)
+            end
+            c_star = callback_value.(cb_data, c)
+            u_at_star = callback_value.(cb_data, u_at)
+            u_tw_star = callback_value.(cb_data, u_tw)
+
+            max_cut, i1, i2, t = firstCut(sepCount, featuresCount, dataCount, x, u_at_star)
+            if max_cut > 1
+                cut = @build_constraint(u_at[i1, t*2] + u_at[i2, t*2+1] <= 1)
+                MOI.submit(m, MOI.LazyConstraint(cb_data), cut)
+            end
+
+            max_cut, k, i, t = secondCut(sepCount, classCount, dataCount, y, c_star, u_at_star, u_tw_star)
+            if max_cut > 1
+                cut = @build_constraint(c[k, t] + u_tw[i, t] + u_at[i, t*2] + u_at[i, t*2+1] <= 1)
+                MOI.submit(m, MOI.LazyConstraint(cb_data), cut)
+            end
+
+            max_cut, i1, i2, t = thirdCut(sepCount, classCount, featuresCount, dataCount, x, c_star, u_at_star, a_star)
+            if max_cut > 2
+                cut = @build_constraint(2 * sum(c[k, t] for k in 1:classCount) + u_at[i1, t*2+1] + u_at[i2, t*2] + sum(a[j, t] for j in 1:featuresCount if x[i1, j] <= x[i2, j]) <= 2)
+                MOI.submit(m, MOI.LazyConstraint(cb_data), cut)
+            end
+        end
+    end
+
+    if add_cuts
+        MOI.set(m, CPLEX.CallbackFunction(), callback_function)
+    end
+
     starting_time = time()
     optimize!(m)
     resolution_time = time() - starting_time
@@ -151,6 +191,90 @@ function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivaria
     end   
 
     return T, objective_value(m), resolution_time, gap
+end
+
+
+function isIntegerPoint(cb_data::CPLEX.CallbackContext, context_id::Clong)
+    if context_id != CPX_CALLBACKCONTEXT_CANDIDATE
+        return false
+    end
+    ispoint_p = Ref{Cint}()
+    ret = CPXcallbackcandidateispoint(cb_data, ispoint_p)
+    # S’il n’y a pas de solution entière
+    if ret != 0 || ispoint_p[] == 0
+        return false
+    else
+        return true
+    end
+end
+
+function firstCut(N::Int, J::Int, I::Int, x::Matrix{Float64}, u_at_star)
+    max_cut = 0
+    best_i1, best_i2, best_t = 0, 0, 0, 0
+    for t in 1:N
+        for j in 1:J
+            for i1 in 1:I
+                for i2 in i1+1:I
+                    if x[i1, j] >= x[i2, j]
+                        current_cut = u_at_star[i1, t*2] + u_at_star[i2, t*2+1]
+                        if current_cut > max_cut
+                            max_cut = current_cut
+                            best_i1, best_i2, best_t = i1, i2, t
+                        end
+                    else
+                        current_cut = u_at_star[i1, t*2+1] + u_at_star[i2, t*2]
+                        if current_cut > max_cut
+                            max_cut = current_cut
+                            best_i1, best_i2, best_t = i2, i1, t
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return max_cut, best_i1, best_i2, best_t
+end
+
+function secondCut(N::Int, K::Int, I::Int, y::Vector, c_star, u_at_star, u_tw_star)
+    max_cut = 0
+    best_k, best_i, best_t = 0, 0, 0
+    for t in 1:N
+        for k in 1:K
+            for i in 1:I
+                if y[i] != k
+                    current_cut = c_star[k, t] + u_tw_star[i, t] + u_at_star[i, t*2] + u_at_star[i, t*2+1]
+                    if current_cut > max_cut
+                        max_cut = current_cut
+                        best_k, best_i, best_t = k, i, t
+                    end
+                end
+            end
+        end
+    end
+    return max_cut, best_k, best_i, best_t
+end
+
+
+function thirdCut(N::Int, K::Int, J::Int, I::Int, x::Matrix{Float64}, c_star, u_at_star, a_star)
+    max_cut = 0
+    best_i1, best_i2, best_t = 0, 0, 0
+    for t in 1:N
+        for i1 in 1:I
+            for i2 in 1:I
+                if i1 != i2
+                    a_sep = [a_star[j, t] for j in 1:J if x[i1, j] <= x[i2, j]]
+                    if length(a_sep) > 0
+                        current_cut = 2 * sum(c_star[k, t] for k in 1:K) + u_at_star[i1, t*2+1] + u_at_star[i2, t*2] + sum(a_sep)
+                        if current_cut > max_cut
+                            max_cut = current_cut
+                            best_i1, best_i2, best_t = i1, i2, t
+                        end
+                    end
+                end
+            end
+        end
+    end  
+    return max_cut, best_i1, best_i2, best_t  
 end
 
 """
