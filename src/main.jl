@@ -1,12 +1,15 @@
 include("building_tree.jl")
 include("utilities.jl")
 
-function main()
+function main(with_callback::Bool=false)
+    if with_callback
+        println("Adding cuts via callback")
+    end
 
     # Pour chaque jeu de données
     # for dataSetName in ["iris", "seeds", "wine", "divorce", "higher_education", "accent"]
     # for dataSetName in ["divorce", "higher_education", "accent"]
-    for dataSetName in ["divorce"]
+    for dataSetName in ["seeds"]
         
         print("=== Dataset ", dataSetName)
 
@@ -41,7 +44,7 @@ function main()
             ## 1 - Univarié (séparation sur une seule variable à la fois)
             # Création de l'arbre
             print("    Univarié...  \t")
-            T, obj, resolution_time, gap = build_tree(X_train, Y_train, D,  classes, multivariate = false, time_limit = time_limit)
+            T, obj, resolution_time, gap = build_tree(X_train, Y_train, D,  classes, multivariate = false, with_callback = with_callback, time_limit = time_limit)
 
             # Test de la performance de l'arbre
             print(round(resolution_time, digits = 1), "s\t")
@@ -54,7 +57,7 @@ function main()
 
             ## 2 - Multivarié
             print("    Multivarié...\t")
-            T, obj, resolution_time, gap = build_tree(X_train, Y_train, D, classes, multivariate = true, time_limit = time_limit)
+            T, obj, resolution_time, gap = build_tree(X_train, Y_train, D, classes, multivariate = true, with_callback = with_callback, time_limit = time_limit)
             print(round(resolution_time, digits = 1), "s\t")
             print("gap ", round(gap, digits = 1), "%\t")
             if T != nothing
@@ -66,4 +69,5 @@ function main()
     end 
 end
 
-main()
+# main()
+main(true)

@@ -22,6 +22,7 @@ function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivaria
     leavesCount = 2^D # Nombre de feuilles de l'arbre
 
     m = Model(CPLEX.Optimizer) 
+    MOI.set(m, MOI.NumberOfThreads(), 1)
     set_silent(m)
 
     if time_limit!=-1
@@ -94,11 +95,23 @@ function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivaria
         @constraint(m, [i in 1:dataCount, t in 1:sepCount], sum(a[j, t]*x[i, j] for j in 1:featuresCount) + mu <= b[t] + (2+mu)*(1-u_at[i, t*2])) # contrainte de capacité controlant le passage dans le noeud fils gauche
         @constraint(m, [i in 1:dataCount, t in 1:sepCount], sum(a[j, t]*x[i, j] for j in 1:featuresCount) >= b[t] - 2*(1-u_at[i, t*2 + 1])) # contrainte de capacité controlant le passage dans le noeud fils droit
         @constraint(m, [i in 1:dataCount, t in 1:sepCount], u_at[i, t*2+1] <= d[t]) # contrainte de capacité empechant les données de passer dans le fils droit d'un noeud n'appliquant pas de règle de branchement
+        if with_callback
+            # Renforcement de la formule
+            @constraint(m, [t in 1:sepCount], sum(a_h[j, t] for j in 1:featuresCount) + sum(c[k,t_a] for k in 1:classCount for t_a in get_t_and_ancestors(t)) == 1)
+            @constraint(m, [t in (sepCount+1):(sepCount+leavesCount), k in 1:classCount], sum(u_tw[i,t] for i in 1:dataCount if y[i] == k) >= c[k,t])
+            @constraint(m, [k in 1:classCount, i in 1:dataCount; y[i] != k], c[k, 1] + u_tw[i, 1] + u_at[i, 2] + u_at[i, 3] <= 1)
+        end
     else
         @constraint(m, [i in 1:dataCount, t in 1:sepCount], sum(a[j, t]*(x[i, j]+mu_vect[j]-mu_min) for j in 1:featuresCount) + mu_min <= b[t] + (1+mu_max)*(1-u_at[i, t*2])) # contrainte de capacité controlant le passage dans le noeud fils gauche
         @constraint(m, [i in 1:dataCount, t in 1:sepCount], sum(a[j, t]*x[i, j] for j in 1:featuresCount) >= b[t] - (1-u_at[i, t*2 + 1])) # contrainte de capacité controlant le passage dans le noeud fils droit
         @constraint(m, [i in 1:dataCount, t in 1:sepCount], u_at[i, t*2+1] <= sum(a[j, t] for j in 1:featuresCount)) # contrainte de capacité empechant les données de passer dans le fils droit d'un noeud n'appliquant pas de règle de branchement
         @constraint(m, [i in 1:dataCount, t in 1:sepCount], u_at[i, t*2] <= sum(a[j, t] for j in 1:featuresCount)) # contrainte de capacité empechant les données de passer dans le fils gauche d'un noeud n'appliquant pas de règle de branchement
+        if with_callback
+            # Renforcement de la formule
+            @constraint(m, [t in 1:sepCount], sum(a[j, t] for j in 1:featuresCount) + sum(c[k,t_a] for k in 1:classCount for t_a in get_t_and_ancestors(t)) == 1)
+            @constraint(m, [t in (sepCount+1):(sepCount+leavesCount), k in 1:classCount], sum(u_tw[i,t] for i in 1:dataCount if y[i] == k) >= c[k,t])
+            @constraint(m, [k in 1:classCount, i in 1:dataCount; y[i] != k], c[k, 1] + u_tw[i, 1] + u_at[i, 2] + u_at[i, 3] <= 1)
+        end
     end
 
     ## Déclaration de l'objectif
@@ -110,35 +123,23 @@ function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivaria
 
     classif = @expression(m, sum(u_at[i, 1] for i in 1:dataCount))
 
-    ## Déclaration des inégalités valides utilisées pour la résolution
-    if with_callback
-        MOI.set(m, MOI.NumberOfThreads(), 1)
-
-        function strengthening_callback(cb_data::CPLEX.CallbackContext, context_id::Clong, verbose::Bool=false)
-            # Teste si le callback viens d'une solution entière
-            if is_integer_point(cb_data, context_id)
-                # A exécuter avant la récupération des valeurs sinon erreur
-                CPLEX.load_callback_variable_primal(cb_data, context_id)
-                if verbose
-                    println("New callback on integer solution")
-                end
-                # A compléter avant utilisation (et a supprimer si aucune utilisation)
-                add_lazy_constraint(m, cb_data, multivariate, verbose)
-            end
-            # Teste si le callback viens d'une solution fractionnaire
-            if is_fractional_point(cb_data, context_id)
-                # A exécuter avant la récupération des valeurs sinon erreur
-                CPLEX.load_callback_variable_primal(cb_data, context_id)
-                if verbose
-                    println("New callback on fractional solution")
-                end
-                # A compléter avant utilisation (et a supprimer si aucune utilisation)
-                add_user_cut(m, cb_data, multivariate, verbose)
-            end
-        end
-
-        MOI.set(m, CPLEX.CallbackFunction(), robustness_callback)
-    end
+    ## Déclaration du callback utilisé pour la résolution
+    # if with_callback
+    #     MOI.set(m, MOI.NumberOfThreads(), 1)
+    #     verbose = false
+    #     function strengthening_callback(cb_data::CPLEX.CallbackContext, context_id::Clong)
+    #         # Teste si le callback viens d'une solution fractionnaire
+    #         if is_fractional_point(cb_data, context_id)
+    #             # A exécuter avant la récupération des valeurs sinon erreur
+    #             CPLEX.load_callback_variable_primal(cb_data, context_id)
+    #             if verbose
+    #                 println("New callback on fractional solution")
+    #             end
+    #             add_user_cut(m, cb_data, x, y, multivariate, verbose)
+    #         end
+    #     end
+    #     MOI.set(m, CPLEX.CallbackFunction(), strengthening_callback)
+    # end
 
     starting_time = time()
     optimize!(m)
@@ -183,6 +184,7 @@ function build_tree(x::Matrix{Float64}, y::Vector, D::Int64, classes; multivaria
 
     return T, objective_value(m), resolution_time, gap
 end
+
 
 """
 FONCTION SIMILAIRE A LA PRECEDENTE UTILISEE UNIQUEMENT SI VOUS FAITES DES REGROUPEMENTS 
@@ -279,14 +281,21 @@ function build_tree(clusters::Vector{Cluster}, D::Int64, classes;multivariate::B
     @constraint(m, [i in 1:clusterCount, t in (sepCount+1):(sepCount+leavesCount)], u_at[i, t] == u_tw[i, t]) # conservation du flot dans les feuilles
     @constraint(m, [i in 1:clusterCount, t in 1:(sepCount+leavesCount)], u_tw[i, t] <= c[findfirst(classes .== clusters[i].class), t]) # contrainte de capacité qui impose le flot a etre nul si la classe de la feuille n'est pas la bonne
     if multivariate
-        
         @constraint(m, [i in 1:clusterCount, t in 1:sepCount, dataId in 1:size(clusters[i].x, 1)], sum(a[j, t]*clusters[i].x[dataId, j] for j in 1:featuresCount) + mu <= b[t] + (2+mu)*(1-u_at[i, t*2])) # contrainte de capacité controlant le passage dans le noeud fils gauche
         @constraint(m, [i in 1:clusterCount, t in 1:sepCount, dataId in 1:size(clusters[i].x, 1)], sum(a[j, t]*clusters[i].x[dataId, j] for j in 1:featuresCount) >= b[t] - 2*(1-u_at[i, t*2 + 1])) # contrainte de capacité controlant le passage dans le noeud fils droit
         @constraint(m, [i in 1:clusterCount, t in 1:sepCount], u_at[i, t*2+1] <= d[t]) # contrainte de capacité empechant les données de passer dans le fils droit d'un noeud n'appliquant pas de règle de branchement
+        if with_callback
+            # Renforcement de la formule
+            @constraint(m, [t in 1:sepCount], sum(a_h[j, t] for j in 1:featuresCount) + sum(c[k,t_a] for k in 1:classCount for t_a in get_t_and_ancestors(t)) == 1)
+        end
     else
         @constraint(m, [i in 1:clusterCount, t in 1:sepCount], sum(a[j, t]*(clusters[i].uBounds[j]+mu_vect[j]-mu_min) for j in 1:featuresCount) + mu_min <= b[t] + (1+mu_max)*(1-u_at[i, t*2])) # contrainte de capacité controlant le passage dans le noeud fils gauche
         @constraint(m, [i in 1:clusterCount, t in 1:sepCount], sum(a[j, t]*clusters[i].lBounds[j] for j in 1:featuresCount) >= b[t] - (1-u_at[i, t*2 + 1])) # contrainte de capacité controlant le passage dans le noeud fils droit
         @constraint(m, [i in 1:clusterCount, t in 1:sepCount], u_at[i, t*2+1] <= sum(a[j, t] for j in 1:featuresCount)) # contrainte de capacité empechant les données de passer dans le fils droit d'un noeud n'appliquant pas de règle de branchement
+        if with_callback
+            # Renforcement de la formule
+            @constraint(m, [t in 1:sepCount], sum(a[j, t] for j in 1:featuresCount) + sum(c[k,t_a] for k in 1:classCount for t_a in get_t_and_ancestors(t)) == 1)
+        end
     end
 
     ## Déclaration de l'objectif
