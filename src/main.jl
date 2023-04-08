@@ -8,8 +8,7 @@ function main(with_callback::Bool=false)
 
     # Pour chaque jeu de données
     # for dataSetName in ["iris", "seeds", "wine", "divorce", "higher_education", "accent"]
-    # for dataSetName in ["divorce", "higher_education", "accent"]
-    for dataSetName in ["seeds"]
+    for dataSetName in ["divorce", "higher_education", "accent"]
         
         print("=== Dataset ", dataSetName)
 
